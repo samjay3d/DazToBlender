@@ -27,7 +27,6 @@ from . import Global
 from . import Versions
 from . import DtbDazMorph
 from . import DtbMaterial
-from . import FitBone
 from . import CustomBones
 from . import Util
 from . import WCmd
@@ -73,6 +72,7 @@ ik_access_ban = False
 ds = DtbMaterial.DtbShaders()
 region = 'UI'
 BV = Versions.getBV()
+total_key_count = 0
 
 def get_influece_data_path(bname):
     amtr = Global.getAmtr()
@@ -105,6 +105,291 @@ def set_translation(matrix, loc):
         return mathutils.Matrix.Translation(loc) * (rot * scale)
     else:
         return mathutils.Matrix.Translation(loc) @ (rot @ scale)
+
+def set_scene_settings():
+    global total_key_count
+    scene = bpy.context.scene
+    scene.frame_start = 0
+    scene.frame_end = total_key_count
+    scene.frame_current = 0
+    scene.unit_settings.length_unit = 'CENTIMETERS'
+
+    Global.setOpsMode('POSE')
+    armature = Global.getAmtr().data
+    armature.display_type = 'OCTAHEDRAL'
+    armature.show_axes = True
+    armature.show_bone_custom_shapes = False
+    #armature.show_names = True
+
+# region - Quaternion to Euler
+
+def get_rotation_order(node_name):
+    print(" AnimBones: " + node_name)
+    bone_limits = Global.get_bone_limit()
+    for bone_limit in bone_limits:
+        if bone_limit[0] in node_name:
+            return bone_limit[1]
+    print(" FAILED Node: " + node_name)
+    return "XYZ"
+
+
+def get_or_create_fcurve(action, data_path, array_index=-1, group=None):
+    for fc in action.fcurves:
+        if fc.data_path == data_path and (array_index < 0 or fc.array_index == array_index):
+            return fc
+
+    fc = action.fcurves.new(data_path, index=array_index)
+    fc.group = group
+    return fc
+
+
+def add_keyframe_euler(action, euler, frame, bone_prefix, group):
+    for i in range(len(euler)):
+        fc = get_or_create_fcurve(
+            action, bone_prefix+"rotation_euler", i, group)
+        pos = len(fc.keyframe_points)
+        fc.keyframe_points.add(1)
+        fc.keyframe_points[pos].co = [frame, euler[i]]
+        fc.update()
+
+
+def frames_matching(action, data_path):
+    frames = set()
+    for fc in action.fcurves:
+        if fc.data_path == data_path:
+            fri = [kp.co[0] for kp in fc.keyframe_points]
+            frames.update(fri)
+    return frames
+
+
+def fcurves_group(action, data_path):
+    for fc in action.fcurves:
+        if fc.data_path == data_path and fc.group is not None:
+            return fc.group
+    return None
+
+
+def convert_quaternion_to_euler(action, obj):
+    # debug
+    all_bones_text = ""
+    
+    bone_prefixes = set()
+    for fc in action.fcurves:
+        # debug
+        all_bones_text += fc.data_path + "\n"
+
+        if fc.data_path == "rotation_quaternion" or fc.data_path[-20:] == ".rotation_quaternion":
+            bone_prefixes.add(fc.data_path[:-19])
+
+    for bone_prefix in bone_prefixes:
+        if (bone_prefix == ""):
+            bone = obj
+        else:
+            # I wish I knew a better way to do this
+            bone = eval("obj."+bone_prefix[:-1])
+
+        data_path = bone_prefix + "rotation_quaternion"
+        frames = frames_matching(action, data_path)
+        group = fcurves_group(action, data_path)
+
+        for fr in frames:
+            quat = bone.rotation_quaternion.copy()
+            for fc in action.fcurves:
+                if fc.data_path == data_path:
+                    quat[fc.array_index] = fc.evaluate(fr)
+
+            start_index = bone_prefix.find("[")
+            end_index = bone_prefix.find("]")
+            bone_name = bone_prefix[start_index + 2: end_index - 1]
+            order = get_rotation_order(bone_name)
+
+            euler = quat.to_euler(order)
+
+            add_keyframe_euler(action, euler, fr, bone_prefix, group)
+            bone.rotation_mode = order
+
+    return all_bones_text
+
+# endregion - Quaternion to Euler
+
+def convert_rotation_orders():
+    Versions.active_object(Global.getAmtr())
+    Global.setOpsMode('POSE')
+    for bone in Global.getAmtr().pose.bones:
+        order = bone.rotation_mode
+        if order == 'XYZ':
+            bone.rotation_mode = 'ZXY'
+        elif order == 'XZY':
+            bone.rotation_mode = 'YZX'
+        elif order == 'YZX':
+            bone.rotation_mode = 'YZX'
+        elif order == 'ZXY':
+            bone.rotation_mode = 'XYZ'
+        elif order == 'ZYX':
+            bone.rotation_mode = 'YZX'
+
+def clean_animations():
+    global total_key_count
+    Versions.active_object(Global.getAmtr())
+    Global.setOpsMode('POSE')
+    
+    # debug
+    all_bones_text = "\nBONES FROM ALL ACTIONS:\n"
+    print("Action Count: " + str(len(bpy.data.actions)) + "\n")
+
+    for action in bpy.data.actions:
+        
+        all_bones_text += "Action: " + action.name + "\n"
+
+        # Convert rotation animation data from quaternion to euler angles
+        all_bones_text += convert_quaternion_to_euler(action, Global.getAmtr())
+        all_bones_text += "\n"
+
+        curve_count = len(action.fcurves)
+        index = 0
+        while index < curve_count:
+            fcurve = action.fcurves[index]
+            start_index = fcurve.data_path.find('[')
+            end_index = fcurve.data_path.find(']')
+            if (start_index == -1 or end_index == -1):
+                if "Genesis" in action.name:
+                    if fcurve.data_path == "rotation_euler":
+                        for point in fcurve.keyframe_points:
+                            point.co[1] = 0
+                    if fcurve.data_path == "scale":
+                        for point in fcurve.keyframe_points:
+                            point.co[1] = 1.0
+                else:
+                    if fcurve.data_path == "location":
+                        fcurve_x = action.fcurves[index + 0]
+                        fcurve_y = action.fcurves[index + 1]
+                        fcurve_z = action.fcurves[index + 2]
+                        point_count = len(fcurve_x.keyframe_points)
+
+                        for i in range(point_count):
+                            # Y invert (-Y)
+                            fcurve_y.keyframe_points[i].co[1] = -fcurve_y.keyframe_points[i].co[1]
+
+                            # Z invert (-Z)
+                            fcurve_z.keyframe_points[i].co[1] = -fcurve_z.keyframe_points[i].co[1]
+                        
+                        index += 2
+            else:
+                node_name = fcurve.data_path[start_index + 2 : end_index - 1]
+                property_name = fcurve.data_path[end_index + 2 :]
+                rotation_order = get_rotation_order(node_name)
+
+                if property_name == "location":
+                    fcurve_x = action.fcurves[index + 0]
+                    fcurve_y = action.fcurves[index + 1]
+                    fcurve_z = action.fcurves[index + 2]
+                    point_count = len(fcurve_x.keyframe_points)
+                    if point_count > total_key_count:
+                        total_key_count = point_count
+
+                    for i in range(point_count):
+                        # Y invert (-Y)
+                        fcurve_y.keyframe_points[i].co[1] = -fcurve_y.keyframe_points[i].co[1]
+
+                        # Z invert (-Z)
+                        fcurve_z.keyframe_points[i].co[1] = -fcurve_z.keyframe_points[i].co[1]
+
+                    # Scale down trasnform animations to match armature's scale
+                    for i in range(point_count):
+                        fcurve_x.keyframe_points[i].co[1] = 0.01 * fcurve_x.keyframe_points[i].co[1]
+
+                        fcurve_y.keyframe_points[i].co[1] = 0.01 * fcurve_y.keyframe_points[i].co[1]
+
+                        fcurve_z.keyframe_points[i].co[1] = 0.01 * fcurve_z.keyframe_points[i].co[1]
+
+                    index += 2
+
+                if property_name == "rotation_euler":
+                    fcurve_x = action.fcurves[index + 0]
+                    fcurve_y = action.fcurves[index + 1]
+                    fcurve_z = action.fcurves[index + 2]
+                    point_count = len(fcurve_x.keyframe_points)
+                    if point_count > total_key_count:
+                        total_key_count = point_count
+
+                    if rotation_order == 'XYZ':
+                        for i in range(point_count):
+                            # YZ switch (Y <-> Z)
+                            temp = fcurve_y.keyframe_points[i].co[1]
+                            fcurve_y.keyframe_points[i].co[1] = fcurve_z.keyframe_points[i].co[1]
+                            fcurve_z.keyframe_points[i].co[1] = temp
+
+                            # XY switch (X <-> Y)
+                            temp = fcurve_x.keyframe_points[i].co[1]
+                            fcurve_x.keyframe_points[i].co[1] = fcurve_y.keyframe_points[i].co[1]
+                            fcurve_y.keyframe_points[i].co[1] = temp
+
+                            if(node_name.startswith("r")):
+                                # Y invert (-Y)
+                                fcurve_y.keyframe_points[i].co[1] = -fcurve_y.keyframe_points[i].co[1]
+
+                                # Z invert (-Z)
+                                fcurve_z.keyframe_points[i].co[1] = -fcurve_z.keyframe_points[i].co[1]
+
+                    elif rotation_order == 'XZY':
+                        for i in range(point_count):
+                            # XY switch (X <-> Y)
+                            temp = fcurve_x.keyframe_points[i].co[1]
+                            fcurve_x.keyframe_points[i].co[1] = fcurve_y.keyframe_points[i].co[1]
+                            fcurve_y.keyframe_points[i].co[1] = temp
+
+                            # X invert (-X)
+                            fcurve_x.keyframe_points[i].co[1] = -fcurve_x.keyframe_points[i].co[1]
+
+                            if(node_name.startswith("r")):
+                                # Y invert (-Y)
+                                fcurve_y.keyframe_points[i].co[1] = -fcurve_y.keyframe_points[i].co[1]
+
+                                # Z invert (-Z)
+                                fcurve_z.keyframe_points[i].co[1] = -fcurve_z.keyframe_points[i].co[1]
+
+                    elif rotation_order == "YZX":
+                        # Bones that are pointed down with YZX order
+                        if node_name in ["hip", "pelvis", "lThighBend", "rThighBend", "lThighTwist", "rThighTwist", "lShin", "rShin"]:
+                            for i in range(point_count):
+                                # Y invert (-Y)
+                                fcurve_y.keyframe_points[i].co[1] = -fcurve_y.keyframe_points[i].co[1]
+
+                                # Z invert (-Z)
+                                fcurve_z.keyframe_points[i].co[1] = -fcurve_z.keyframe_points[i].co[1]
+
+                    elif rotation_order == "ZXY":
+                        for i in range(point_count):
+                            # XY switch (X <-> Y)
+                            temp = fcurve_x.keyframe_points[i].co[1]
+                            fcurve_x.keyframe_points[i].co[1] = fcurve_y.keyframe_points[i].co[1]
+                            fcurve_y.keyframe_points[i].co[1] = temp
+
+                            # YZ switch (Y <-> Z)
+                            temp = fcurve_y.keyframe_points[i].co[1]
+                            fcurve_y.keyframe_points[i].co[1] = fcurve_z.keyframe_points[i].co[1]
+                            fcurve_z.keyframe_points[i].co[1] = temp
+
+                    elif rotation_order == "ZYX":
+                        for i in range(point_count):
+                            # YZ switch (Y <-> Z)
+                            temp = fcurve_y.keyframe_points[i].co[1]
+                            fcurve_y.keyframe_points[i].co[1] = fcurve_z.keyframe_points[i].co[1]
+                            fcurve_z.keyframe_points[i].co[1] = temp
+
+                            # X invert (-X)
+                            fcurve_x.keyframe_points[i].co[1] = -fcurve_x.keyframe_points[i].co[1]
+                    
+                    index += 2
+
+            index += 1
+    
+    #debug
+    # debug_log_file = open("logFile.txt", "a")
+    # debug_log_file.write(all_bones_text)
+    # debug_log_file.close()
+
+    convert_rotation_orders()
 
 class DTB_PT_Main(bpy.types.Panel):
     bl_label = "DazToBlender"
@@ -221,13 +506,13 @@ class DTB_PT_Main(bpy.types.Panel):
 
 class IMP_OT_FBX(bpy.types.Operator):
     bl_idname = "import.fbx"
-    bl_label = " Import New Genesis 3/8"
+    bl_label = "Import New Genesis 3/8"
     bl_options = {'REGISTER', 'UNDO'}
     root = Global.getRootPath()
 
     def invoke(self, context, event):
-        if bpy.data.is_dirty:
-            return context.window_manager.invoke_confirm(self, event)
+        # if bpy.data.is_dirty:
+        #     return context.window_manager.invoke_confirm(self, event)
         return self.execute(context)
 
     def finish_obj(self):
@@ -252,6 +537,13 @@ class IMP_OT_FBX(bpy.types.Operator):
         wm.progress_update(v)
 
     def import_one(self,fbx_adr):
+        # delete any default cube from the scene
+        for obj in bpy.data.objects:
+            if obj.name == "Cube":
+                Global.deselect()
+                Versions.select(obj, True)
+                bpy.ops.object.delete()
+
         Versions.active_object_none()
         Util.decideCurrentCollection('FIG')
         Util.clear_dzidx_material_and_nodegroup()
@@ -267,21 +559,19 @@ class IMP_OT_FBX(bpy.types.Operator):
         Global.decide_HERO()
         self.pbar(15, wm)
         if Global.getAmtr() is not None and Global.getBody() is not None:
-            Global.deselect()
-            drb.clear_pose()
-            drb.mub_ary_A()
-            drb.orthopedy_empty()
+            Global.deselect() # deselect all the objects
+            drb.clear_pose() # Select Armature and clear transform
+            drb.mub_ary_A() # Find and read FIG.dat file
+            drb.orthopedy_empty() # On "EMPTY" type objects
             self.pbar(18, wm)
-            drb.orthopedy_everything()
+            drb.orthopedy_everything() # clear transform, clear and reapply parent
             Global.deselect()
             self.pbar(20, wm)
-            drb.fitHeadChildren()
+            drb.set_bone_head_tail() # Sets head and tail positions for all the bones
             Global.deselect()
-            FitBone.FitBone(True)
             self.pbar(25, wm)
             drb.bone_limit_modify()
-            drb.fitbone_roll()
-            Global.meipe_bone()
+            clean_animations()
             Global.deselect()
             self.pbar(30, wm)
             drb.unwrapuv()
@@ -334,7 +624,7 @@ class IMP_OT_FBX(bpy.types.Operator):
                     if bc.name == bname + "_IK":
                         pbik = amt.pose.bones.get(bname + "_IK")
                         amt.pose.bones[bname].constraints[bname + '_IK'].influence = 0
-            drb.makeBRotationCut(db)
+            drb.makeBRotationCut(db) # lock movements around axes with zeroed limits for each bone
             Global.deselect()
             DtbMaterial.forbitMinus()
             self.pbar(95,wm)
@@ -347,6 +637,7 @@ class IMP_OT_FBX(bpy.types.Operator):
             Global.setOpsMode("OBJECT")
             Util.Posing().setpose()
             bone_disp(-1, True)
+            set_scene_settings()
             self.pbar(100,wm)
             ik_access_ban = False
             self.report({"INFO"}, "Success")
@@ -357,6 +648,8 @@ class IMP_OT_FBX(bpy.types.Operator):
 
     def execute(self, context):
         global ik_access_ban
+        global total_key_count
+        total_key_count = 0
 
         if self.root == "":
             self.report({"ERROR"}, "Appropriate FBX does not exist!")

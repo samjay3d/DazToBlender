@@ -279,7 +279,7 @@ def find_BODY(dobj):
                         for slot in dobj.material_slots:
                             for m in mtls:
                                 if m in slot.name:
-                                    point -= 1;
+                                    point -= 1
                                     break
                         if point < 5:
                             _BODY = dobj.name
@@ -448,9 +448,9 @@ def decide_HERO():
     if bool_body[0] == False:
         _BODY = ""
     if bool_body[1] == False:
-        _EYLS = "";
+        _EYLS = ""
     if bool_body[2] == False:
-        _HAIR = "";
+        _HAIR = ""
     if _BODY == "":
         return
     if mf == 0:
@@ -484,22 +484,6 @@ def addG3Database(isman):
         DataBase.f_geni.append(addtbl)
     cur.close()
     con.close()
-
-def meipe_bone():
-    if getIsMan() or Geo_Idx!=2:
-        return
-    bones = ["labia","rectum","vagina","clitoris","labium"]
-    dobj = getAmtr()
-    Versions.select(dobj,True)
-    Versions.active_object(dobj)
-    ob = bpy.context.object
-    setOpsMode('EDIT')
-    for bone in ob.data.edit_bones:
-        for bn in bones:
-            if bn in bone.name.lower():
-                bone.tail[2] = bone.head[2]-2
-        #if bone.name.endswith("_end"):
-        #    dobj.data.edit_bones.remove(bone)
 
 def getMf():
     global Geo_Idx
@@ -729,13 +713,13 @@ def toGeniVIndex(vidx):
     if getIsMan() == False:
         for ridx, r in enumerate(DataBase.f_geni[Geo_Idx-1]):
             if vidx < r[0] and ridx > 0:
-                vidx -= old;
+                vidx -= old
                 break
             old = r[1]
     else:
         for ridx, r in enumerate(DataBase.m_geni[Geo_Idx-1]):
             if vidx < r[0] and ridx > 0:
-                vidx -= old;
+                vidx -= old
                 break
             old = r[1]
     return vidx
@@ -755,49 +739,110 @@ def getRig_id():
             return d.data['rig_id']
             
 def bone_limit_modify():
+    bone_limits = DataBase.get_bone_limits()
 
-    cur = db.g8_blimit
-    if getIsG3():
-        cur = cur[4:]
-        cur.extend(db.g3_blimit)
-    for rows in cur:
-        if len(rows)==2:
-            continue
-        odr = rows[1]
-        row = [rows[0], ""]
-        for i in range(2, len(rows)):
-            row.append(rows[i])
-        # Z_INVERT
-        if odr == 'YZX' or odr == 'XYZ':
-            if row[0] != '*rCollar':
-                work = 0 - row[7]
-                row[7] = 0 - row[6]
-                row[6] = work
-        xy_invert =['rCollar','rShldrBend','rForearmBend','rForearmTwist','rShldrTwist','rThumb2','rThumb3','rThumb1','rHand']
-        #Y_INVERT and X_INVERT
-        for xyi in xy_invert:   
-            if row[0]==xyi:
-                for i in range(2):
-                    work = row[2+i*2]
-                    row[2+i*2] = 0-row[2+i*2+1]
-                    row[2+i*2+1] = 0-work
-        # XY switch
-        if odr == 'XZY' or odr == 'XYZ': 
+    for bone_limit in bone_limits:
+        name = bone_limit[0]
+        order = bone_limit[1]
+
+        prefix = name[0:1]
+        post_prefix = name[1:2]
+        bone_type = 'none'
+        if prefix == "l" and post_prefix.isupper():
+            bone_type = 'left'
+        elif prefix == "r" and post_prefix.isupper():
+            bone_type = 'right'
+        else:
+            bone_type = 'center'
+        
+        do_conversion = True
+
+        if do_conversion and order == 'XYZ':
+            # YZ switch (Y <-> Z)
             for i in range(2):
-                work = row[2 + i]
-                row[2 + i] = row[4 + i]
-                row[4 + i] = work
-        # YZ switch
-        if odr == 'ZYX':  
+                temp = bone_limit[4 + i]
+                bone_limit[4 + i] = bone_limit[6 + i]
+                bone_limit[6 + i] = temp
+
+            # XY switch (X <-> Y)
             for i in range(2):
-                work = row[4 + i]
-                row[4 + i] = row[6 + i]
-                row[6 + i] = work
-        if row[0][1:] == 'Foot':
-            work = 0 - row[7]
-            row[7] = 0 - row[6]
-            row[6] = work
-        add_bone_limit(row)
+                temp = bone_limit[2 + i]
+                bone_limit[2 + i] = bone_limit[4 + i]
+                bone_limit[4 + i] = temp
+
+            if bone_type == 'right':
+                # Y invert (-Y)
+                temp = 0 - bone_limit[5]
+                bone_limit[5] = 0 - bone_limit[4]
+                bone_limit[4] = temp
+
+                # Z invert (-Z)
+                temp = 0 - bone_limit[7]
+                bone_limit[7] = 0 - bone_limit[6]
+                bone_limit[6] = temp
+                
+        elif do_conversion and order == 'XZY':
+            # XY switch (X <-> Y)
+            for i in range(2):
+                temp = bone_limit[2 + i]
+                bone_limit[2 + i] = bone_limit[4 + i]
+                bone_limit[4 + i] = temp
+
+            # X invert (-X)
+            temp = 0 - bone_limit[3]
+            bone_limit[3] = 0 - bone_limit[2]
+            bone_limit[2] = temp
+
+            if bone_type == 'right':
+                # Y invert (-Y)
+                temp = 0 - bone_limit[5]
+                bone_limit[5] = 0 - bone_limit[4]
+                bone_limit[4] = temp
+
+                # Z invert (-Z)
+                temp = 0 - bone_limit[7]
+                bone_limit[7] = 0 - bone_limit[6]
+                bone_limit[6] = temp
+        
+        elif do_conversion and order == "YZX":
+            # Bones that are pointed down with YZX order
+            if name in ["hip", "pelvis", "lThighBend", "rThighBend", "lThighTwist", "rThighTwist", "lShin", "rShin"]:
+                # Y invert (-Y)
+                temp = 0 - bone_limit[5]
+                bone_limit[5] = 0 - bone_limit[4]
+                bone_limit[4] = temp
+
+                # Z invert (-Z)
+                temp = 0 - bone_limit[7]
+                bone_limit[7] = 0 - bone_limit[6]
+                bone_limit[6] = temp
+
+        elif do_conversion and order == 'ZXY':
+            # XY switch (X <-> Y)
+            for i in range(2):
+                temp = bone_limit[2 + i]
+                bone_limit[2 + i] = bone_limit[4 + i]
+                bone_limit[4 + i] = temp
+
+            # YZ switch (Y <-> Z)
+            for i in range(2):
+                temp = bone_limit[4 + i]
+                bone_limit[4 + i] = bone_limit[6 + i]
+                bone_limit[6 + i] = temp
+
+        elif do_conversion and order == 'ZYX':
+            # YZ switch (Y <-> Z)
+            for i in range(2):
+                temp = bone_limit[4 + i]
+                bone_limit[4 + i] = bone_limit[6 + i]
+                bone_limit[6 + i] = temp
+            
+            # X invert (-X)
+            temp = 0 - bone_limit[3]
+            bone_limit[3] = 0 - bone_limit[2]
+            bone_limit[2] = temp
+
+        add_bone_limit(bone_limit)
 
 def toMergeWeight(dobj, ruler_idx, slave_idxs):
     setOpsMode('OBJECT')
@@ -1014,7 +1059,7 @@ def changeSize(size, mub_ary):
     change_size = 1 if size == 100 else 0.01
     setOpsMode("OBJECT")
     for i in range(3):
-        if armature.scale[i]!=change_size:
+        if armature.scale[i] != change_size:
             armature.scale[i] = change_size
     deselect()
     if mub_ary !=[]:
